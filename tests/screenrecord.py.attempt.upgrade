@@ -1,7 +1,7 @@
 import os
 import subprocess
 import tkinter as tk
-from tkinter import simpledialog, messagebox
+from tkinter import simpledialog, messagebox, ttk
 import time
 import threading
 import signal
@@ -19,9 +19,19 @@ class ScreenRecorder:
         self.final_file = None
         self.video_proc = None
         self.audio_proc = None
+        self.camera_proc = None
         self.recording_thread = None
 
+        # Detect available screens
+        self.available_screens = self.detect_screens()
+        self.selected_screen = os.environ.get('DISPLAY', ':0.0')
+
         # GUI Elements
+        self.screen_dropdown = ttk.Combobox(control_frame, values=self.available_screens, state="readonly")
+        self.screen_dropdown.set(self.selected_screen)
+        self.screen_dropdown.grid(row=0, column=3, padx=10)
+        self.screen_dropdown.bind("<<ComboboxSelected>>", self.update_screen_selection)
+
         self.toggle_button = tk.Button(control_frame, text="Start", command=self.toggle_recording, width=15, height=2)
         self.toggle_button.grid(row=0, column=0, padx=10)
 
@@ -31,7 +41,11 @@ class ScreenRecorder:
         self.mic_button = tk.Button(control_frame, text="Mic Off", command=self.toggle_mic, bg="red", fg="white", width=15, height=2)
         self.mic_button.grid(row=0, column=2, padx=10)
 
+        self.camera_button = tk.Button(control_frame, text="Camera Off", command=self.toggle_camera, bg="red", fg="white", width=15, height=2)
+        self.camera_button.grid(row=0, column=4, padx=10)
+
         self.mic_enabled = False  # Mic state
+        self.camera_on = False  # Camera state
 
         self.status_label = tk.Label(root, text="Status: Stopped", anchor='w')
         self.status_label.pack(fill='x', padx=10, pady=5)
@@ -56,12 +70,58 @@ class ScreenRecorder:
 
         self.update_info()
 
+    def detect_screens(self):
+        try:
+            output = subprocess.check_output(['xrandr'], stderr=subprocess.DEVNULL).decode()
+            screens = [line.split()[0] for line in output.splitlines() if ' connected' in line]
+            return screens
+        except Exception as e:
+            print(f"Error detecting screens: {e}")
+            return [os.environ.get('DISPLAY', ':0.0')]
+
+    def update_screen_selection(self, event):
+        self.selected_screen = self.screen_dropdown.get()
+
     def toggle_mic(self):
         self.mic_enabled = not self.mic_enabled
         if self.mic_enabled:
             self.mic_button.config(text="Mic On", bg="green")
+            if self.is_recording and not self.audio_proc:
+                self.start_mic_recording()
         else:
             self.mic_button.config(text="Mic Off", bg="red")
+            if self.audio_proc:
+                self.audio_proc.terminate()
+                self.audio_proc = None
+
+    def toggle_camera(self):
+        self.camera_on = not self.camera_on
+        if self.camera_on:
+            self.camera_button.config(text="Camera On", bg="green")
+            self.start_camera_recording()
+        else:
+            self.camera_button.config(text="Camera Off", bg="red")
+            if self.camera_proc:
+                self.camera_proc.terminate()
+                self.camera_proc = None
+
+    def start_camera_recording(self):
+        try:
+            self.camera_proc = subprocess.Popen([
+                'ffmpeg', '-f', 'v4l2', '-i', '/dev/video0', '-c:v', 'libx264', '-r', '30', '-preset', 'ultrafast',
+                os.path.join(self.output_dir, "camera_recording.mp4")
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"Error starting camera recording: {e}")
+
+    def start_mic_recording(self):
+        try:
+            self.audio_file = os.path.join(self.output_dir, "temp_audio.wav")
+            self.audio_proc = subprocess.Popen([
+                'arecord', '-f', 'cd', '-t', 'wav', '-r', '16000', self.audio_file
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except Exception as e:
+            print(f"Error starting mic recording: {e}")
 
     def toggle_recording(self):
         if self.is_recording:
@@ -82,17 +142,14 @@ class ScreenRecorder:
         self.root.after(0, lambda: self.pause_button.config(state="normal"))
 
         self.video_file = os.path.join(self.output_dir, "temp_video.mp4")
-        self.audio_file = os.path.join(self.output_dir, "temp_audio.wav")
 
         self.video_proc = subprocess.Popen([
-            'ffmpeg', '-f', 'x11grab', '-s', '1920x1080', '-i', os.environ['DISPLAY'],
+            'ffmpeg', '-f', 'x11grab', '-s', '1920x1080', '-i', self.selected_screen,
             '-c:v', 'libx264', '-r', '30', '-preset', 'ultrafast', self.video_file
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if self.mic_enabled:
-            self.audio_proc = subprocess.Popen([
-                'arecord', '-f', 'cd', '-t', 'wav', '-r', '16000', self.audio_file
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self.start_mic_recording()
 
         self.update_info()
 
@@ -125,6 +182,8 @@ class ScreenRecorder:
             self.video_proc.terminate()
         if self.audio_proc:
             self.audio_proc.terminate()
+        if self.camera_proc:
+            self.camera_proc.terminate()
 
         self.is_recording = False
         self.root.after(0, lambda: self.status_label.config(text="Status: Stopped"))
@@ -134,12 +193,9 @@ class ScreenRecorder:
         if self.recording_thread and self.recording_thread.is_alive():
             self.recording_thread.join()
 
-        if self.mic_enabled:
-            self.combine_audio_video()
-        else:
-            self.final_file = self.video_file
+        self.prompt_to_save()
 
-    def combine_audio_video(self):
+    def prompt_to_save(self):
         file_name = simpledialog.askstring("Save Recording", "Enter file name (leave blank for default):")
         if not file_name:
             existing_files = [f for f in os.listdir(self.output_dir) if f.startswith("screenrecording") and f.endswith(".mp4")]
@@ -149,19 +205,25 @@ class ScreenRecorder:
             file_name += ".mp4"
 
         self.final_file = os.path.join(self.output_dir, file_name)
-        
-        if self.mic_enabled and os.path.exists(self.audio_file):
-            subprocess.run([
-                'ffmpeg', '-i', self.video_file, '-i', self.audio_file, '-c:v', 'copy', '-c:a', 'aac', self.final_file
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            if os.path.exists(self.audio_file):
-                os.remove(self.audio_file)
-        else:
-            os.rename(self.video_file, self.final_file)
+        try:
+            if self.mic_enabled and os.path.exists(self.audio_file):
+                subprocess.run([
+                    'ffmpeg', '-i', self.video_file, '-i', self.audio_file, '-c:v', 'copy', '-c:a', 'aac', self.final_file
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        if os.path.exists(self.video_file):
-            os.remove(self.video_file)
+                if os.path.exists(self.audio_file):
+                    os.remove(self.audio_file)
+            else:
+                os.rename(self.video_file, self.final_file)
+
+            if os.path.exists(self.video_file):
+                os.remove(self.video_file)
+
+            messagebox.showinfo("Recording Saved", f"Recording saved as: {self.final_file}")
+        except Exception as e:
+            print(f"Error saving recording: {e}")
+            messagebox.showerror("Save Error", "Failed to save the recording. Please check permissions and paths.")
 
     def update_info(self):
         if self.is_recording:
@@ -185,7 +247,7 @@ def main():
         sys.exit(0)
 
     root = tk.Tk()
-    root.geometry("500x250")
+    root.geometry("700x300")
 
     control_frame = tk.Frame(root)
     control_frame.pack(pady=10)
