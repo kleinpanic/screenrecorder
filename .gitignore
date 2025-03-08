@@ -1,1 +1,4 @@
-screenrecordervenv/
+venv/
+tests/
+*.bak
+*.~

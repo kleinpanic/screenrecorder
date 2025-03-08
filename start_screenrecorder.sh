@@ -4,10 +4,10 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-VENV_PATH="$PROJECT_ROOT/screenrecordervenv"
+VENV_PATH="$PROJECT_ROOT/venv"
 
 source "$VENV_PATH/bin/activate"
 
-python "$PROJECT_ROOT/src/screenrecord.py" &
+python3 "$PROJECT_ROOT/src/screenrecord.py" &
 
 deactivate
